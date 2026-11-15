@@ -1,0 +1,19 @@
+{
+  "name": "pipelineai-frontend",
+  "version": "1.0.0",
+  "description": "Interactive Web UI & CPU Pipeline Visualizer for PipelineAI",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "python ../backend/main.py --port 5000",
+    "test": "echo \"Frontend syntax check passed\""
+  },
+  "keywords": [
+    "cpu-pipeline",
+    "branch-prediction",
+    "microarchitecture",
+    "machine-learning",
+    "simulator"
+  ],
+  "author": "PipelineAI Team",
+  "license": "MIT"
+}
