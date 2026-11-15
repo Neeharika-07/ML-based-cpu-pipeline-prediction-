@@ -1,205 +1,192 @@
 """
-PipelineAI - Data Preprocessing Script (Member 2)
-Description:
-    Cleans the raw text dataset (raw_dataset.csv) and converts it to pure numbers (processed_dataset.csv).
-    Implements the 5 required tasks in order:
-    1. Parse Instructions into Opcode, Dest, Src1, Src2
-    2. Handle Missing Values (drop empty rows)
-    3. Extract Register Numbers (strip 'R')
-    4. Create Hazard Feature (Is_Same_Register)
-    5. Encode Text to Numbers using Label Encoding
-
-Output Columns:
-    Opcode_1, Opcode_2, Dest_Reg_1, Src_Reg_1_Inst2, Src_Reg_2_Inst2,
-    Is_Same_Register, Is_Load_Inst1, Distance, Conflict_Type_Label
+PipelineAI - Machine Learning Preprocessing Module
+Converts raw CPU branch trace logs into ML-ready training, validation, and test datasets,
+and provides live feature extraction for inference in the CPU pipeline simulator.
 """
 
 import os
-import re
-import sys
-import time                                                                                                                                                                                                      vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv
 import argparse
+from typing import Dict, List, Tuple, Union, Optional
+import numpy as np
 import pandas as pd
 
+DEFAULT_HIST_LEN = 16
+DEFAULT_PC_MOD = 4096
+DEFAULT_N_TRAIN = 14000
+DEFAULT_N_VAL = 3000
 
-# 1. Opcode Mapping (ADD=0, SUB=1, LOAD=2, STORE=3, etc.)
-OPCODE_MAP = {
-    'ADD': 0,
-    'SUB': 1,
-    'LOAD': 2,
-    'STORE': 3,
-    'MUL': 4,
-    'DIV': 5,
-    'AND': 6,
-    'OR': 7,
-    'XOR': 8,
-    'SHIFT': 9
-}
-
-# 2. Conflict Type Mapping (No Hazard=0, RAW=1, WAR=2, WAW=3)
-CONFLICT_MAP = {
-    'NO HAZARD': 0,
-    'NO_HAZARD': 0,
-    'NONE': 0,
-    'RAW': 1,
-    'WAR': 2,
-    'WAW': 3
-}
+FEATURE_COLS = ["pc_idx"] + [f"h{k}" for k in range(1, DEFAULT_HIST_LEN + 1)]
+METADATA_COLS = ["trace_num", "branch_index", "split"]
 
 
-def clean_register(reg_token: str) -> int:
+class BranchPreprocessor:
     """
-    Extracts the integer register number from a register string.
-    Example: 'R1' -> 1, 'R15' -> 15.
-    If plain integer string: parses directly.
+    Preprocessor for branch prediction traces in CPU pipelines.
+    Computes hashed PC indices (pc % 4096) and 16-bit Global Branch History (h1..h16).
     """
-    token = str(reg_token).strip()
-    if token.upper().startswith('R'):
-        digits = token[1:]
-        if digits.isdigit():
-            return int(digits)
-    # If integer
-    match = re.search(r'\d+', token)
-    if match:
-        return int(match.group())
-    return 0
 
+    def __init__(self, hist_len: int = DEFAULT_HIST_LEN, pc_mod: int = DEFAULT_PC_MOD):
+        self.hist_len = hist_len
+        self.pc_mod = pc_mod
+        self.feature_cols = ["pc_idx"] + [f"h{k}" for k in range(1, hist_len + 1)]
 
-def parse_instruction(inst_str: str) -> dict:
-    """
-    Splits an instruction into Opcode, Dest, Src1, and Src2.
-    Handles:
-    - Arithmetic / Logical: 'ADD R1, R2, R3' -> Opcode=ADD, Dest=1, Src1=2, Src2=3
-    - Load / Store:         'LOAD R1, 0(R2)' -> Opcode=LOAD, Dest=1, Src1=2, Src2=0
-    - Load / Store:         'STORE R2, 0(R5)' -> Opcode=STORE, Dest=2, Src1=5, Src2=0
-    """
-    cleaned = str(inst_str).strip()
-    if not cleaned:
-        raise ValueError("Empty instruction")
+    def process_trace_dataframe(
+        self,
+        raw_df: pd.DataFrame,
+        n_train: int = DEFAULT_N_TRAIN,
+        n_val: int = DEFAULT_N_VAL
+    ) -> pd.DataFrame:
+        """
+        Converts raw trace table (trace_num, branch_index, pc, taken)
+        into processed features (trace_num, branch_index, split, pc_idx, h1..h16, label).
+        """
+        required_cols = {"trace_num", "branch_index", "pc", "taken"}
+        if not required_cols.issubset(raw_df.columns):
+            missing = required_cols - set(raw_df.columns)
+            raise ValueError(f"Raw DataFrame missing required columns: {missing}")
 
-    parts = cleaned.split(maxsplit=1)
-    opcode = parts[0].strip().upper()
-    operands_str = parts[1].strip() if len(parts) > 1 else ""
+        traces_out = []
+        for trace_id, group in raw_df.groupby("trace_num"):
+            g = group.sort_values("branch_index").reset_index(drop=True).copy()
+            # Construct shift history h1..h16
+            for k in range(1, self.hist_len + 1):
+                g[f"h{k}"] = g["taken"].shift(k)
 
-    opcode_id = OPCODE_MAP.get(opcode, 0)
-    dest_reg = 0
-    src1_reg = 0
-    src2_reg = 0
+            # Drop warmup branches where history is incomplete
+            g = g.iloc[self.hist_len:].reset_index(drop=True)
 
-    # Check for offset(register) syntax: e.g. LOAD R1, 0(R2) or STORE R2, 0(R5)
-    mem_match = re.search(r'([Rr]?\d+)\s*,\s*(\d*)\s*\(([Rr]?\d+)\)', operands_str)
-    if mem_match:
-        dest_reg = clean_register(mem_match.group(1))
-        offset = int(mem_match.group(2)) if mem_match.group(2) else 0
-        src1_reg = clean_register(mem_match.group(3))
-        src2_reg = offset
-    else:
-        # Standard comma-separated operands
-        tokens = [t.strip() for t in operands_str.split(',') if t.strip()]
-        if len(tokens) >= 1:
-            dest_reg = clean_register(tokens[0])
-        if len(tokens) >= 2:
-            src1_reg = clean_register(tokens[1])
-        if len(tokens) >= 3:
-            src2_reg = clean_register(tokens[2])
+            # Modulo hash the Program Counter (ASLR invariant)
+            g["pc_idx"] = g["pc"].astype("int64") % self.pc_mod
+            g["label"] = g["taken"].astype(int)
 
-    return {
-        'opcode_str': opcode,
-        'opcode_id': opcode_id,
-        'dest': dest_reg,
-        'src1': src1_reg,
-        'src2': src2_reg
-    }
+            # Chronological split within trace
+            pos = g.index
+            g["split"] = (pos >= n_train).astype(int) + (pos >= n_train + n_val).astype(int)
+            traces_out.append(g)
 
+        if not traces_out:
+            return pd.DataFrame(columns=METADATA_COLS + self.feature_cols + ["label"])
 
-def preprocess_dataset(input_csv: str, output_csv: str) -> pd.DataFrame:
-    """
-    Processes raw_dataset.csv into processed_dataset.csv adhering strictly
-    to the 5 required steps and generating the exact 9 numerical columns.
-    """
-    if not os.path.exists(input_csv):
-        raise FileNotFoundError(f"Input file not found: {input_csv}")
+        processed = pd.concat(traces_out, ignore_index=True)
+        final_cols = METADATA_COLS + self.feature_cols + ["label"]
+        processed = processed[final_cols]
 
-    print(f"[*] Step 1 & 2: Loading raw dataset and handling missing values: {input_csv}")
-    raw_df = pd.read_csv(input_csv)
-    initial_count = len(raw_df)
+        for k in range(1, self.hist_len + 1):
+            processed[f"h{k}"] = processed[f"h{k}"].astype(int)
 
-    # Step 2: Handle Missing Values - delete any empty row
-    raw_df = raw_df.dropna(subset=['Instruction_1', 'Instruction_2'])
-    raw_df = raw_df[raw_df['Instruction_1'].str.strip() != '']
-    raw_df = raw_df[raw_df['Instruction_2'].str.strip() != '']
-    print(f"[*] Retained {len(raw_df):,} of {initial_count:,} rows after dropping missing values.")
+        return processed
 
-    processed_rows = []
+    def process_file(
+        self,
+        input_csv_path: str,
+        output_csv_path: Optional[str] = None,
+        n_train: int = DEFAULT_N_TRAIN,
+        n_val: int = DEFAULT_N_VAL
+    ) -> pd.DataFrame:
+        """Processes raw CSV file on disk and optionally saves the output."""
+        if not os.path.exists(input_csv_path):
+            raise FileNotFoundError(f"Input file not found: {input_csv_path}")
 
-    for idx, row in raw_df.iterrows():
-        # Step 1 & 3: Parse Instructions and extract register numbers
-        i1 = parse_instruction(row['Instruction_1'])
-        i2 = parse_instruction(row['Instruction_2'])
+        raw = pd.read_csv(input_csv_path)
+        processed = self.process_trace_dataframe(raw, n_train=n_train, n_val=n_val)
 
-        opcode_1 = i1['opcode_id']
-        opcode_2 = i2['opcode_id']
-        dest_reg_1 = i1['dest']
-        src_reg_1_inst2 = i2['src1']
-        src_reg_2_inst2 = i2['src2']
+        if output_csv_path:
+            os.makedirs(os.path.dirname(os.path.abspath(output_csv_path)), exist_ok=True)
+            processed.to_csv(output_csv_path, index=False)
+            print(f"[Preprocessor] Saved {len(processed):,} rows to {output_csv_path}")
 
-        # Step 4: Create Hazard Feature (Is_Same_Register)
-        # If Dest of Instruction_1 == Src of Instruction_2 (either src1 or src2), put 1, else 0
-        if dest_reg_1 == src_reg_1_inst2 or dest_reg_1 == src_reg_2_inst2:
-            is_same_register = 1
+        return processed
+
+    def encode_live_branch(
+        self,
+        pc: Union[int, str],
+        history: Union[List[int], str, int]
+    ) -> pd.DataFrame:
+        """
+        Encodes a single live branch instruction for real-time inference in CPU simulator.
+        
+        Args:
+            pc: Program Counter as int or hex string (e.g., 0x401020 or 4198432)
+            history: 16-bit history as list of ints [h1, ..., h16], binary string "1010...", or integer bitmask
+        
+        Returns:
+            DataFrame with columns matching FEATURE_COLS
+        """
+        if isinstance(pc, str):
+            pc_val = int(pc, 16) if pc.startswith("0x") or pc.startswith("0X") else int(pc)
         else:
-            is_same_register = 0
+            pc_val = int(pc)
 
-        # Additional required pipeline features
-        is_load_inst1 = 1 if i1['opcode_str'] == 'LOAD' else 0
-        distance = 1  # Consecutive instructions in pipeline
+        pc_idx = pc_val % self.pc_mod
 
-        # Step 5: Encode Text to Numbers using Label Encoding
-        conflict_raw = str(row['Conflict_Type']).strip().upper()
-        conflict_label = CONFLICT_MAP.get(conflict_raw, 0)
+        # Parse history
+        hist_vector = []
+        if isinstance(history, str):
+            clean_str = history.replace(" ", "").replace("_", "")
+            # Ensure 16 bits
+            bits = [int(b) for b in clean_str]
+            if len(bits) < self.hist_len:
+                bits = [0] * (self.hist_len - len(bits)) + bits
+            hist_vector = bits[:self.hist_len]
+        elif isinstance(history, int):
+            # Bitmask: least significant bit is h1 or vice versa
+            hist_vector = [(history >> (self.hist_len - 1 - i)) & 1 for i in range(self.hist_len)]
+        elif isinstance(history, (list, tuple, np.ndarray)):
+            hist_list = list(history)
+            if len(hist_list) < self.hist_len:
+                hist_list = [0] * (self.hist_len - len(hist_list)) + hist_list
+            hist_vector = [int(x) for x in hist_list[:self.hist_len]]
+        else:
+            hist_vector = [0] * self.hist_len
 
-        processed_rows.append({
-            'Opcode_1': opcode_1,
-            'Opcode_2': opcode_2,
-            'Dest_Reg_1': dest_reg_1,
-            'Src_Reg_1_Inst2': src_reg_1_inst2,
-            'Src_Reg_2_Inst2': src_reg_2_inst2,
-            'Is_Same_Register': is_same_register,
-            'Is_Load_Inst1': is_load_inst1,
-            'Distance': distance,
-            'Conflict_Type_Label': conflict_label
-        })
+        row_dict = {"pc_idx": [pc_idx]}
+        for i, val in enumerate(hist_vector, start=1):
+            row_dict[f"h{i}"] = [val]
 
-    processed_df = pd.DataFrame(processed_rows)
+        return pd.DataFrame(row_dict)[self.feature_cols]
 
-    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
-    processed_df.to_csv(output_csv, index=False)
+    @staticmethod
+    def load_splits(
+        processed_csv_path: str
+    ) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
+        """
+        Loads preprocessed dataset and splits into Train (split=0), Val (split=1), Test (split=2).
+        Features: pc_idx, h1..h16
+        Target: label
+        """
+        if not os.path.exists(processed_csv_path):
+            raise FileNotFoundError(f"Processed dataset not found: {processed_csv_path}")
 
-    print(f"[+] Output successfully generated at: {output_csv}")
-    print(f"[+] Total rows: {len(processed_df)}")
-    print(f"[+] Columns ({len(processed_df.columns)}): {list(processed_df.columns)}")
+        df = pd.read_csv(processed_csv_path)
+        feature_cols = ["pc_idx"] + [f"h{k}" for k in range(1, DEFAULT_HIST_LEN + 1)]
 
-    return processed_df
+        train_mask = df["split"] == 0
+        val_mask = df["split"] == 1
+        test_mask = df["split"] == 2
+
+        X_train = df.loc[train_mask, feature_cols]
+        y_train = df.loc[train_mask, "label"]
+
+        X_val = df.loc[val_mask, feature_cols]
+        y_val = df.loc[val_mask, "label"]
+
+        X_test = df.loc[test_mask, feature_cols]
+        y_test = df.loc[test_mask, "label"]
+
+        return X_train, y_train, X_val, y_val, X_test, y_test
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Member 2 Preprocessing Pipeline")
-    parser.add_argument('--input', '-i', type=str, default='dataset/raw_dataset.csv', help="Path to raw_dataset.csv")
-    parser.add_argument('--output', '-o', type=str, default='dataset/processed_dataset.csv', help="Path to processed_dataset.csv")
+    parser = argparse.ArgumentParser(description="PipelineAI Branch Trace Preprocessor")
+    parser.add_argument("--input", default="dataset/raw_dataset.csv", help="Path to raw dataset CSV")
+    parser.add_argument("--output", default="dataset/processed_dataset.csv", help="Path to output processed CSV")
+    parser.add_argument("--hist-len", type=int, default=DEFAULT_HIST_LEN, help="History register length")
+    parser.add_argument("--pc-mod", type=int, default=DEFAULT_PC_MOD, help="Modulo for PC index hash")
     args = parser.parse_args()
 
-    # Resolve paths relative to project root
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(script_dir) if os.path.basename(script_dir) == 'ml' else script_dir
-
-    input_path = os.path.abspath(os.path.join(project_root, args.input)) if not os.path.isabs(args.input) else args.input
-    output_path = os.path.abspath(os.path.join(project_root, args.output)) if not os.path.isabs(args.output) else args.output
-
-    start_time = time.time()
-    preprocess_dataset(input_path, output_path)
-    elapsed = time.time() - start_time
-    print(f"[+] Preprocessing finished in {elapsed:.2f} seconds.")
+    preprocessor = BranchPreprocessor(hist_len=args.hist_len, pc_mod=args.pc_mod)
+    preprocessor.process_file(args.input, args.output)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
