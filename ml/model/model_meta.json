@@ -1,0 +1,98 @@
+{
+  "timestamp": "2026-11-15 16:44:28",
+  "features": [
+    "pc_idx",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "h7",
+    "h8",
+    "h9",
+    "h10",
+    "h11",
+    "h12",
+    "h13",
+    "h14",
+    "h15",
+    "h16"
+  ],
+  "feature_importance": [
+    {
+      "feature": "h6",
+      "importance": 0.2348
+    },
+    {
+      "feature": "h15",
+      "importance": 0.1296
+    },
+    {
+      "feature": "h9",
+      "importance": 0.0892
+    },
+    {
+      "feature": "pc_idx",
+      "importance": 0.0649
+    },
+    {
+      "feature": "h2",
+      "importance": 0.063
+    },
+    {
+      "feature": "h10",
+      "importance": 0.0529
+    },
+    {
+      "feature": "h12",
+      "importance": 0.0506
+    },
+    {
+      "feature": "h3",
+      "importance": 0.0456
+    },
+    {
+      "feature": "h4",
+      "importance": 0.0455
+    },
+    {
+      "feature": "h8",
+      "importance": 0.0385
+    },
+    {
+      "feature": "h1",
+      "importance": 0.0378
+    },
+    {
+      "feature": "h5",
+      "importance": 0.0273
+    },
+    {
+      "feature": "h11",
+      "importance": 0.0263
+    },
+    {
+      "feature": "h13",
+      "importance": 0.0261
+    },
+    {
+      "feature": "h16",
+      "importance": 0.0242
+    },
+    {
+      "feature": "h7",
+      "importance": 0.0221
+    },
+    {
+      "feature": "h14",
+      "importance": 0.0216
+    }
+  ],
+  "best_model": "XGBoost",
+  "dataset_samples": {
+    "train": 140000,
+    "val": 30000,
+    "test": 30000
+  }
+}
