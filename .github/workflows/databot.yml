@@ -1,0 +1,117 @@
+
+name: DataBot - Dataset Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "What should DataBot do?"
+        required: true
+        type: string
+      issue_number:
+        description: "GitHub issue number to post the report (optional)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  dataset-manager:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas numpy
+
+      - name: Run DataBot
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          TASK: ${{ inputs.task }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import os, json, urllib.request, subprocess
+
+          task = os.environ["TASK"]
+
+          files = []
+          for root, dirs, names in os.walk("."):
+              dirs[:] = [d for d in dirs if d not in [".git", ".github", "__pycache__"]]
+              for name in names:
+                  if name.endswith((".py", ".csv", ".md", ".txt")):
+                      path = os.path.join(root, name)
+                      if os.path.getsize(path) < 100000:
+                          files.append(path)
+
+          context = []
+          for path in files[:40]:
+              if path.endswith(".csv"):
+                  context.append(f"{path}: CSV file exists")
+              else:
+                  try:
+                      with open(path, encoding="utf-8") as f:
+                          context.append(f"\n--- {path} ---\n{f.read()[:5000]}")
+                  except Exception:
+                      pass
+
+          prompt = f"""
+          You are DataBot, the dataset management teammate.
+          Project: ML-Based CPU Pipeline Prediction.
+          Your responsibilities are dataset inspection, data quality,
+          preprocessing, missing values, duplicates and documentation.
+
+          User task: {task}
+
+          Repository information:
+          {''.join(context)}
+
+          Give a detailed, accurate report.
+          Do not claim to have modified files.
+          """
+
+          payload = {
+              "model": "gpt-4.1-mini",
+              "input": prompt
+          }
+
+          req = urllib.request.Request(
+              "https://api.openai.com/v1/responses",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "Authorization": "Bearer " + os.environ["OPENAI_API_KEY"],
+                  "Content-Type": "application/json"
+              }
+          )
+
+          with urllib.request.urlopen(req) as response:
+              result = json.loads(response.read())
+
+          report = "\n".join(
+              item["text"]
+              for output in result["output"]
+              for item in output.get("content", [])
+              if item.get("type") == "output_text"
+          )
+
+          print(report)
+
+          issue = os.environ.get("ISSUE_NUMBER")
+          if issue:
+              subprocess.run([
+                  "gh", "issue", "comment", issue,
+                  "--repo", os.environ["REPO"],
+                  "--body", "## 🤖 DataBot Report\n\n" + report
+              ], check=True)
+          PY
